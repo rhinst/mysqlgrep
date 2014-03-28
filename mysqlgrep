@@ -1,0 +1,133 @@
+#!/usr/bin/env perl -w
+
+# mysqlgrep - a utility to search for a string in any field in any 
+#             or all tables in a mysql database.
+#
+# @author     Rob Hinst <rob@hinst.net>
+# @license    http://opensource.org/licenses/MIT  MIT License
+# @link       https://github.com/rhinst/mysqlgrep
+
+use strict;
+use DBI;
+use Getopt::Long;
+
+sub usage {
+  print <<END;
+
+  Usage: mysqlgrep -u username -h hostname -d database -t table pattern
+    -u username : mysql username to connect with (default: root).
+    -h hostname : hostname of mysql server to connect to (default: localhost).
+    -d database : name of mysql database
+    -t table    : name of the table to search within. If not provided, all tables will be searched.
+    -l          : only list which tables contain a match, don't display actual data
+    pattern     : the pattern to search for.
+
+END
+      
+  exit;
+}
+
+my ($username,$password,$hostname,$database) = ('root','','localhost','');
+my ($table, $pattern, $listOnly) = ('','',0);
+my @tables = ();
+
+my ($dbh,$sql,$sth,$field,$results);
+my @results;
+my @fields;
+my @keyFields;
+my @values;
+
+GetOptions(
+  "username=s" => \$username,
+  "hostname=s" => \$hostname,
+  "database=s" => \$database,
+  "table=s" => \$table,
+  "list-primary-keys-only" => \$listOnly
+);
+
+$pattern = $ARGV[0] or usage;
+
+print "$username Password: ";
+system "stty -echo";
+chomp($password = <STDIN>);
+system "stty echo";
+
+$dbh = DBI->connect("DBI:mysql:$database:$hostname",$username,$password) or die("ERROR: Unable to connect to database!\n");
+
+
+if($table) {
+  @tables = ($table);
+}
+else {
+  $sql = "SHOW TABLES";
+  $sth = $dbh->prepare($sql);
+  $sth->execute();
+
+  while(@results = $sth->fetchrow) {
+    push(@tables, $results[0]);
+  }
+
+  $sth->finish;
+}
+
+
+foreach $table (@tables) {
+  $sql = "SHOW FIELDS FROM $table";
+  $sth = $dbh->prepare($sql);
+  $sth->execute();
+
+  @fields = ();
+  @keyFields = ();
+  while($results = $sth->fetchrow_hashref) {
+    push(@fields, $results->{Field});
+    if($results->{Key} eq 'PRI') {
+      push(@keyFields, $results->{Field});
+    }
+  }
+
+  $sth->finish;
+  
+  $sql = "SELECT ";
+  if($listOnly && (@keyFields > 0)) {
+    $sql .= join(',', @keyFields);
+  }
+  else {
+    $sql .= "*";
+  }
+
+  $sql .= " FROM $table WHERE 1=0";
+
+  foreach $field (@fields) {
+    $sql .= " OR $field LIKE '\%$pattern\%'";
+  }
+
+  $sth = $dbh->prepare($sql);
+  $sth->execute();
+  while($results = $sth->fetchrow_hashref) {
+    if(@keyFields > 0) {
+      @values = ();
+      foreach $field (@keyFields) {
+        push(@values, "$field=" . $results->{$field});
+      }
+      print "$table (" . join(',', @values) . ")";
+    }
+    else {
+      print "$table (no primary key defined)\n";
+    }
+    if($listOnly) {
+      print "\n";
+    }
+    else {
+      print ":\n";
+      foreach $field (@fields) {
+        if($results->{$field} && (index(lc($results->{$field}), lc($pattern)) > -1)) {
+          print "      * $field: " . $results->{$field} . "\n";
+        }
+      }
+    }
+    print "\n";
+  }
+  $sth->finish;
+}
+
+$dbh->disconnect();
